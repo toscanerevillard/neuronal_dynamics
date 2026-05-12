@@ -28,7 +28,7 @@ from src.lif import lif_euler_step
 # stochastic background fluctuations. Spike generation used the exercise’s discrete spike-train 
 # convention, and neuron dynamics reused the Euler-integrated LIF update from Exercise 0.”
 
-def simulate_recurrent_exc_inh(
+def simulate_population_exc_inh(
     W,
     NE,
     I0_const_nA,
