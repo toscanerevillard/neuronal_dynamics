@@ -12,6 +12,8 @@ from src.lif import lif_euler_step
 # The stochastic background input follows the Exercise 0 Poisson formulation 
 # (included for consistency with all subsequent exercises in the assignment).
 # The discrete spike convention follow again the Exercise 0: S[k,i] = 1/dt 
+# VERY IMPORTANT : The argument I_ext_t is a matrix of shape (n_steps, N) used for ex 1.5
+# used in Exercise 1.5
 
 # Approach:
 # - Describe total number of neurons N from W.shape and split inhibitory neurons as N - NE 
@@ -44,6 +46,7 @@ def simulate_population_exc_inh(
     *,
     rng,
     u0=None,
+    I_ext_t=None,
 ):
     """
     Total input:
@@ -81,7 +84,11 @@ def simulate_population_exc_inh(
         else:
             I_bg = 0.0
 
-        I_ext = np.full(N, float(I0_const_nA), dtype=float)
+        if I_ext_t is not None:
+            I_ext = I_ext_t[k]
+        else:
+            I_ext = np.full(N, float(I0_const_nA), dtype=float)
+
         I_total = I_syn + I_ext + I_bg
 
         u = lif_euler_step(u, I_total, dt=dt, tau_m=tau_m, R=R)
