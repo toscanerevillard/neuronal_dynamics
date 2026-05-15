@@ -3,7 +3,7 @@ from scipy.sparse import csr_matrix
 
 # Purpose:
 # Generate the recurrent connectivity matrix W for the random sparse E/I network
-# required for achieve ex 1.1
+# required for Exercise 1.1
 
 # Source of Code and Justification:
 # The project defines that each neuron receives exactly
