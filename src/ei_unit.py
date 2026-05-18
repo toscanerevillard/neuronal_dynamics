@@ -19,16 +19,19 @@ from src.lif import lif_euler_step
 # - Describe total number of neurons N from W.shape and split inhibitory neurons as N - NE 
 #   (index convention : first NE neurons are excitatory, remaining are inhibitory).
 # - Maintain membrane potentials across time steps with lif_euler_step (forward Euler integration).
-# - At each timestep, compute delayed spikes s_delayed from S[k - delay_steps], 
-#   then Isyn = W @ s_delayed.
+# - At each timestep, compute delayed spikes s_delayed from S[k - delay_steps].
+# - Compute recurrent synaptic current as I_syn = W @ s_delayed, directly implementing Eq. (3):
+#   w_ij (pC) * s_j (1/ms) = I_syn (nA).
 # - Combine inputs as I_syn + uniform constant external current + independent Poisson background.
 # - Threshold resets voltages and records spikes; store trajectories U and spike matrix S.
 
 # What to say in Report:
-# “We simulated the recurrent E/I network using the full input decomposition required in Exercise 1:
-# delayed recurrent currents from sparse synaptic weights plus constant external current and 
-# stochastic background fluctuations. Spike generation used the exercise’s discrete spike-train 
-# convention, and neuron dynamics reused the Euler-integrated LIF update from Exercise 0.”
+# "We simulated the recurrent E/I network using the full input decomposition required in Exercise 1:
+# delayed recurrent currents computed as W @ s_delayed, directly implementing Eq. (3) where
+# w_ij (pC) multiplied by s_j = 1/dt (ms^-1) gives a synaptic current in nA, plus external
+# current and stochastic background fluctuations.
+# Spike generation used the exercise's discrete spike-train
+# convention, and neuron dynamics reused the Euler-integrated LIF update from Exercise 0."
 
 def simulate_population_exc_inh(
     W,
@@ -50,7 +53,7 @@ def simulate_population_exc_inh(
 ):
     """
     Total input:
-      I_total = W * S[k-delay] + I0_const + I_Poisson_background
+      I_total = W @ S[k-delay] + I0_const + I_Poisson_background
     Returns U, S for N = NE + NI from W.shape[0].
     Spike convention respect part 0 :
       S[k, i] = 1/dt on the step neuron i spikes, else S[k, i] = 0
@@ -77,8 +80,10 @@ def simulate_population_exc_inh(
         else:
             s_delayed = np.zeros(N, dtype=float)
 
+        # Compute recurrent synaptic current directly from Eq. (3):
+        # w_ij (pC) * s_j (1/ms) = I_syn (nA).
         I_syn = W @ s_delayed
-
+        
         if n_bg > 0:
             I_bg = bg_scale * rng.poisson(n_bg, size=N)
         else:
@@ -121,10 +126,10 @@ def simulate_population_exc_inh(
 #   and dividing by duration_s.
 
 # What to say in Report:
-# “Population firing rates were estimated by averaging spiking activity across neurons in each 
+# "Population firing rates were estimated by averaging spiking activity across neurons in each 
 # population, restricting to the analysis interval indicated in the Exercise 0.2. Spike counts 
 # followed the assignment discrete-time convention by integrating S*(dt), and firing rates were 
-# reported in Hz by dividing by interval duration.”
+# reported in Hz by dividing by interval duration."
 
 
 def population_rate_hz(S, index_interval, dt, t_start_ms, t_end_ms):
@@ -143,3 +148,167 @@ def population_rate_hz(S, index_interval, dt, t_start_ms, t_end_ms):
     mean_hz = counts.mean() / duration_s
 
     return float(mean_hz)
+
+
+# Purpose:
+# Define a reusable EIUnit class representing one recurrent excitatory-inhibitory (E-I) unit.
+# This class wraps the Exercise 1 sparse recurrent E/I network into an object that can be
+# updated one timestep at a time using a step(I_E, I_I) method.
+# The class will serve as the fundamental building block for the cortical field model in Exercise 2.
+
+# Source of Code and Justification:
+# Exercise 2.2 explicitly suggests wrapping the Exercise 1 network into a class defining
+# a single E-I unit with a function step(I_E, I_I).
+# The recurrent within-unit dynamics are reused directly from Exercise 1:
+# - sparse recurrent connectivity matrix W
+# - delayed synaptic interactions
+# - stochastic background input
+# - Euler integration of LIF neurons
+#
+# The Neuronal Dynamics field-model framework also represents cortex as interacting local
+# population units distributed across space. Each EIUnit therefore represents one local
+# cortical population pair that will later be coupled to other units through population-level
+# interactions on the ring.
+
+# Approach:
+# - Store all neuron and simulation parameters inside the class.
+# - Initialize membrane potentials and delayed spike-history buffers.
+# - Reuse the Exercise 1 recurrent synaptic dynamics inside the unit.
+# - Implement a step(I_E, I_I) method that:
+#     1. computes delayed recurrent synaptic input,
+#     2. adds external and stochastic background inputs,
+#     3. updates membrane voltages using Euler integration,
+#     4. detects threshold crossings and resets spiking neurons,
+#     5. stores the spike vector for delayed recurrence,
+#     6. returns instantaneous E and I population activities.
+#
+# This step-based architecture allows many E-I units to be simulated independently and later
+# coupled together in the cortical field model.
+
+# What to say in Report:
+# "To construct the cortical field model, the recurrent E/I network from Exercise 1 was wrapped
+# into an EIUnit class representing one local cortical population pair. Each EIUnit contains
+# sparse recurrent excitatory and inhibitory connectivity, delayed synaptic interactions,
+# stochastic background activity, and LIF membrane dynamics. The class exposes a
+# step(I_E, I_I) method that advances the network by one timestep and returns the
+# instantaneous excitatory and inhibitory population activities. This modular structure
+# allows multiple E-I units to be coupled together spatially in the ring model."
+
+
+class EIUnit:
+    """
+    One recurrent E-I unit used as the building block of the cortical field model.
+
+    The unit contains:
+    - NE excitatory neurons
+    - NI inhibitory neurons
+    - one sparse recurrent connectivity matrix W
+    - one-step LIF dynamics with delayed recurrent synaptic input
+
+    The step(I_E, I_I) method updates the unit by one timestep.
+    """
+
+    def __init__(
+        self,
+        W,
+        NE,
+        dt,
+        tau_m,
+        R,
+        theta,
+        u_reset,
+        tau_delay_ms,
+        n_bg,
+        bg_scale,
+        rng,
+        u0=None,
+    ):
+        self.W = W
+        self.NE = int(NE)
+        self.N = int(W.shape[0])
+        self.NI = self.N - self.NE
+
+        self.dt = float(dt)
+        self.tau_m = float(tau_m)
+        self.R = float(R)
+        self.theta = float(theta)
+        self.u_reset = float(u_reset)
+        self.tau_delay_ms = float(tau_delay_ms)
+        self.delay_steps = int(round(tau_delay_ms / dt))
+
+        self.n_bg = float(n_bg)
+        self.bg_scale = float(bg_scale)
+        self.rng = rng
+
+        if u0 is None:
+            self.u = self.rng.uniform(self.u_reset, self.theta, size=self.N).astype(float)
+        else:
+            self.u = np.asarray(u0, dtype=float).copy()
+
+        # Keep spike history so delayed recurrent input can be computed.
+        self.spike_history = []
+
+    def step(self, I_E, I_I):
+        """
+        Advance this E-I unit by one timestep.
+
+        Parameters
+        ----------
+        I_E : float
+            External input to all excitatory neurons of this unit.
+        I_I : float
+            External input to all inhibitory neurons of this unit.
+
+        Returns
+        -------
+        u : array, shape (N,)
+            Updated membrane potentials.
+        s : array, shape (N,)
+            Spike vector for this timestep, with s[i] = 1/dt if neuron i spikes.
+        r_E : float
+            Instantaneous excitatory population activity.
+        r_I : float
+            Instantaneous inhibitory population activity.
+        """
+
+        if len(self.spike_history) >= self.delay_steps:
+            s_delayed = self.spike_history[-self.delay_steps]
+        else:
+            s_delayed = np.zeros(self.N, dtype=float)
+
+        # Compute recurrent synaptic current directly from Eq. (3):
+        # w_ij (pC) * s_j (1/ms) = I_syn (nA).
+        I_syn = self.W @ s_delayed
+
+        if self.n_bg > 0:
+            I_bg = self.bg_scale * self.rng.poisson(self.n_bg, size=self.N)
+        else:
+            I_bg = 0.0
+
+        I_ext = np.zeros(self.N, dtype=float)
+        I_ext[:self.NE] = float(I_E)
+        I_ext[self.NE:] = float(I_I)
+
+        I_total = I_syn + I_ext + I_bg
+
+        self.u = lif_euler_step(
+            self.u,
+            I_total,
+            dt=self.dt,
+            tau_m=self.tau_m,
+            R=self.R,
+        )
+
+        spiked = self.u >= self.theta
+
+        s = np.zeros(self.N, dtype=float)
+        s[spiked] = 1.0 / self.dt
+
+        self.u[spiked] = self.u_reset
+
+        self.spike_history.append(s.copy())
+
+        r_E = s[:self.NE].mean()
+        r_I = s[self.NE:].mean()
+
+        return self.u.copy(), s, r_E, r_I
